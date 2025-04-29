@@ -31,6 +31,39 @@ static wine_prereserve_t my_wine_reserve[] = {{(void*)0x00010000, 0x00008000}, {
 
 int wine_preloaded = 0;
 
+// ---- Virtual Heap para fragmentação real ----
+#include <assert.h>
+typedef struct {
+    uintptr_t guest_start; // Endereço virtual x86_64
+    uintptr_t host_start;  // Endereço real ARM64
+    size_t    size;
+} virtual_heap_block_t;
+#define MAX_VHEAP_BLOCKS 128
+static virtual_heap_block_t vheap_blocks[MAX_VHEAP_BLOCKS];
+static int vheap_blocks_count = 0;
+static uintptr_t vheap_next_guest = 0x180000000ULL; // Endereço alto para evitar conflito
+
+void* vheap_alloc(size_t size) {
+    void* real = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+    if(real == MAP_FAILED) return NULL;
+    uintptr_t guest_addr = vheap_next_guest;
+    vheap_next_guest += ((size + 0xFFFFF) & ~0xFFFFF); // Alinha para 1MB
+    assert(vheap_blocks_count < MAX_VHEAP_BLOCKS);
+    vheap_blocks[vheap_blocks_count++] = (virtual_heap_block_t){guest_addr, (uintptr_t)real, size};
+    printf_log(LOG_INFO, "[Box64] Virtual heap: mapeado bloco real %p (size 0x%lx) para guest 0x%lx\n", real, size, guest_addr);
+    return (void*)guest_addr;
+}
+
+void* vheap_translate(uintptr_t guest_addr) {
+    for(int i=0; i<vheap_blocks_count; ++i) {
+        if(guest_addr >= vheap_blocks[i].guest_start && guest_addr < vheap_blocks[i].guest_start + vheap_blocks[i].size) {
+            uintptr_t offset = guest_addr - vheap_blocks[i].guest_start;
+            return (void*)(vheap_blocks[i].host_start + offset);
+        }
+    }
+    return NULL;
+}
+
 static int get_prereserve(const char* reserve, void** addr, size_t* size)
 {
     if(!reserve)
@@ -112,10 +145,27 @@ void wine_prereserve(const char* reserve)
                 base += this_size;
                 remaining -= this_size;
             }
-            if(fallback_ok)
+            if(fallback_ok) {
                 printf_log(LOG_INFO, "[Box64] Fallback com blocos menores bem-sucedido.\n");
-            else
-                printf_log(LOG_INFO, "[Box64] Fallback falhou. O aplicativo pode não funcionar corretamente devido à limitação de VA do kernel.\n");
+            } else {
+                printf_log(LOG_INFO, "[Box64] Fallback falhou. Tentando virtual heap para fragmentação real...\n");
+                // Fragmentação real: tenta mapear a região usando virtual heap
+                size_t remaining_vh = my_wine_reserve[idx].size;
+                uintptr_t base_vh = (uintptr_t)my_wine_reserve[idx].addr;
+                size_t vh_block = 64*1024*1024; // 64MB
+                while(remaining_vh > 0) {
+                    size_t this_size = (remaining_vh > vh_block) ? vh_block : remaining_vh;
+                    void* guest = vheap_alloc(this_size);
+                    if(!guest) {
+                        printf_log(LOG_INFO, "[Box64] Virtual heap falhou ao alocar bloco de 0x%lx\n", this_size);
+                        break;
+                    }
+                    // Opcional: poderia registrar guest/base_vh para tradução reversa se necessário
+                    base_vh += this_size;
+                    remaining_vh -= this_size;
+                }
+                printf_log(LOG_INFO, "[Box64] Virtual heap: fragmentação real aplicada.\n");
+            }
             remove_prereserve(idx);
         } else {
             setProtection_mmap((uintptr_t)my_wine_reserve[idx].addr, my_wine_reserve[idx].size, 0);
