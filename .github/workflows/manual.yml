@@ -36,12 +36,12 @@ on:
       dynarec:
         description: 'Enable dynarec'
         required: false
-        default: 'true'
+        default: true
         type: boolean
       trace:
         description: 'Enable trace'
         required: false
-        default: 'false'
+        default: false
         type: boolean
 
 jobs:
@@ -55,7 +55,11 @@ jobs:
         run: |
           sudo apt-get update
           if [[ ${{ github.event.inputs.platform }} != 'X64' && ${{ github.event.inputs.platform }} != 'GENERIC_ARM' ]]; then
-            echo "BOX64_PLATFORM_MARCRO=-D${{ github.event.inputs.platform }}=1" >> $GITHUB_ENV
+            if [[ ${{ github.event.inputs.platform }} == 'ARM64' || ${{ github.event.inputs.platform }} == 'RPI4ARM64' || ${{ github.event.inputs.platform }} == 'RPI5ARM64' || ${{ github.event.inputs.platform }} == 'RK3326' || ${{ github.event.inputs.platform }} == 'RK3399' || ${{ github.event.inputs.platform }} == 'RK3588' || ${{ github.event.inputs.platform }} == 'PHYTIUM' || ${{ github.event.inputs.platform }} == 'SD845' || ${{ github.event.inputs.platform }} == 'SD888' || ${{ github.event.inputs.platform }} == 'ADLINK' || ${{ github.event.inputs.platform }} == 'TEGRAX1' || ${{ github.event.inputs.platform }} == 'GENERIC_ARM' ]]; then
+              echo "BOX64_PLATFORM_MARCRO=-D${{ github.event.inputs.platform }}=1 -DARM_DYNAREC=1" >> $GITHUB_ENV
+            else
+              echo "BOX64_PLATFORM_MARCRO=-D${{ github.event.inputs.platform }}=1" >> $GITHUB_ENV
+            fi
             echo "BOX64_COMPILER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
             sudo apt-get -y install git gcc-aarch64-linux-gnu cmake make python3
           else
@@ -64,7 +68,7 @@ jobs:
               echo "BOX64_COMPILER=gcc" >> $GITHUB_ENV
               sudo apt-get -y install git cmake make python3
             else
-              echo BOX64_PLATFORM_MARCRO="-DARM_DYNAREC=ON" >> $GITHUB_ENV
+              echo BOX64_PLATFORM_MARCRO="-DARM_DYNAREC=1" >> $GITHUB_ENV
               echo "BOX64_COMPILER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
               sudo apt-get -y install git gcc-aarch64-linux-gnu cmake make python3
             fi
