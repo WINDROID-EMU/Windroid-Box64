@@ -23,6 +23,9 @@ typedef struct wine_prereserve_32_s
 } wine_prereserve_32_t;
 #include "box32.h"
 #endif
+// ATENÇÃO: Em ambientes ARM64/Android, o kernel pode limitar o espaço de endereçamento virtual (VA) a 39 bits (~512GB).
+// Isso pode causar falha na reserva de grandes blocos de memória necessários para Wine64/jogos AAA.
+// O código abaixo tenta lidar melhor com essa limitação, tentando reservar blocos menores caso a reserva original falhe.
 // only the prereseve argument is reserved, not the other zone that wine-preloader reserve
 static wine_prereserve_t my_wine_reserve[] = {{(void*)0x00010000, 0x00008000}, {(void*)0x00110000, 0x30000000}, {(void*)0x7f000000, 0x03000000}, {0, 0}, {0, 0}};
 
@@ -89,10 +92,30 @@ void wine_prereserve(const char* reserve)
         int isfree = isBlockFree(my_wine_reserve[idx].addr, my_wine_reserve[idx].size);
         if(isfree) ret=mmap(my_wine_reserve[idx].addr, my_wine_reserve[idx].size, 0, MAP_FIXED|MAP_PRIVATE|MAP_ANON|MAP_NORESERVE, -1, 0); else ret = NULL;
         if(!isfree || (ret!=my_wine_reserve[idx].addr)) {
-            if(addr>=(void*)0x10000LL)
-                printf_log(LOG_INFO, "Warning, prereserve of %p:0x%lx is not free\n", my_wine_reserve[idx].addr, my_wine_reserve[idx].size);
+            printf_log(LOG_INFO, "[Box64] Falha ao reservar bloco grande (%p:0x%lx). Tentando fallback com blocos menores devido à limitação de VA\n", my_wine_reserve[idx].addr, my_wine_reserve[idx].size);
             if(ret)
                 munmap(ret, my_wine_reserve[idx].size);
+            // Tentar reservar blocos menores (128MB)
+            size_t fallback_size = 128*1024*1024; // 128MB
+            size_t remaining = my_wine_reserve[idx].size;
+            uintptr_t base = (uintptr_t)my_wine_reserve[idx].addr;
+            int fallback_ok = 1;
+            while(remaining > 0) {
+                size_t this_size = (remaining > fallback_size) ? fallback_size : remaining;
+                void* fallback_ret = mmap((void*)base, this_size, 0, MAP_FIXED|MAP_PRIVATE|MAP_ANON|MAP_NORESERVE, -1, 0);
+                if(fallback_ret != (void*)base) {
+                    printf_log(LOG_INFO, "[Box64] Fallback mmap também falhou em %p:0x%lx\n", (void*)base, this_size);
+                    fallback_ok = 0;
+                    break;
+                }
+                setProtection_mmap(base, this_size, 0);
+                base += this_size;
+                remaining -= this_size;
+            }
+            if(fallback_ok)
+                printf_log(LOG_INFO, "[Box64] Fallback com blocos menores bem-sucedido.\n");
+            else
+                printf_log(LOG_INFO, "[Box64] Fallback falhou. O aplicativo pode não funcionar corretamente devido à limitação de VA do kernel.\n");
             remove_prereserve(idx);
         } else {
             setProtection_mmap((uintptr_t)my_wine_reserve[idx].addr, my_wine_reserve[idx].size, 0);
