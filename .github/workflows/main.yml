@@ -1,0 +1,60 @@
+name: Build and Release Windroid-box64
+
+# Dispara o workflow apenas quando for feito push de uma tag no formato vX.Y.Z
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [ANDROID]
+
+    steps:
+      # 1. Checkout do código
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Setup de dependências (exemplo para Android SDK; ajuste conforme necessário)
+      - name: Setup Android SDK
+        uses: android-actions/setup-ndk@v2
+        with:
+          ndk-version: '25.1.8937393'
+
+      # 3. Build do Box64 para Windroid
+      - name: Build box64 for Windroid
+        if: matrix.platform == 'ANDROID'
+        run: |
+          echo "Gerando build para Android..."
+          mkdir -p build
+          # Aqui devem vir seus comandos de compilação: configure, make, etc.
+          # Exemplo fictício:
+          cd src
+          ./configure --host=aarch64-linux-android --prefix="$GITHUB_WORKSPACE/build"
+          make -j$(nproc)
+          make install
+          cd "$GITHUB_WORKSPACE/build"
+          # Compacta tudo em formato ZIP, mas já com extensão .rat
+          7z -tzip -mx=5 a box64-latest.rat *
+
+      # 4. Cria o Release no GitHub
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}       # ex.: v1.2.3
+          release_name: Windroid-box64
+          draft: false
+          prerelease: false
+
+      # 5. Faz upload do .rat como asset do Release
+      - name: Upload Windroid-box64.rat to Release
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: build/box64-latest.rat
+          asset_name: Windroid-box64.rat
+          asset_content_type: application/octet-stream
