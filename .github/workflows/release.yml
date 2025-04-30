@@ -1,60 +1,147 @@
-name: Build and Release Windroid-box64
+### Auto build Box64 and release its binary with Github Action
+name: Build and Release Box64
 
-# Dispara o workflow apenas quando for feito push de uma tag no formato vX.Y.Z
 on:
+  workflow_dispatch:
+  release:
   push:
-    tags:
-      - 'v*.*.*'
+    paths:
+      - "**/*.c"
+      - "**/*.h"
+      - "**/*.S"
+      - "**/*.py"
+      - "CMakeLists.txt"
+      - "**/*.yml"
+  pull_request:
+    types: [assigned, opened, synchronize, reopened]
+    paths:
+      - "**/*.c"
+      - "**/*.h"
+      - "**/*.S"
+      - "**/*.py"
+      - "CMakeLists.txt"
+      - "**/*.yml"
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
+  build:
     strategy:
+      fail-fast: false
       matrix:
-        platform: [ANDROID]
+        platform: [ARM64, ANDROID]
+        type: [Release]
+        os: [ubuntu-latest, ubuntu-22.04-arm]
+        exclude:
+          - platform: ARM64
+            os: ubuntu-latest
+          - platform: ANDROID
+            os: ubuntu-22.04-arm
 
+    runs-on: ${{ matrix.os }}
     steps:
-      # 1. Checkout do código
-      - name: Checkout repository
+      - name: "Checkout Box64 Repository"
         uses: actions/checkout@v4
 
-      # 2. Setup de dependências (exemplo para Android SDK; ajuste conforme necessário)
-      - name: Setup Android SDK
-        uses: android-actions/setup-ndk@v2
-        with:
-          ndk-version: '25.1.8937393'
+      - name: "Environment preparation"
+        run: |
+          sudo apt-get update
+          if [[ ${{ matrix.platform }} == 'ANDROID' ]]; then
+            sudo apt-get -y install git cmake make python3 patchelf
+            sudo apt-get -y install p7zip
+            wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+            unzip -qq android-ndk-r26b-linux.zip
+            echo "BOX64_COMPILER=$PWD/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android31-clang" >> $GITHUB_ENV
+            echo "BOX64_PLATFORM_MARCRO=-DANDROID=1 -DARM_DYNAREC=1 -DBAD_SIGNAL=1" >> $GITHUB_ENV
+            git clone https://github.com/termux/termux-docker.git
+            sudo cp -rf termux-docker/system/arm /system
+            sudo chown -R $(whoami):$(whoami) /system
+            sudo chmod 755 -R /system
+            echo "IS_TERMUX=0" >> $GITHUB_ENV
+          else
+            sudo apt-get -y install git gcc-aarch64-linux-gnu cmake make python3
+            echo BOX64_PLATFORM_MARCRO="-DARM64=1 -DARM_DYNAREC=1" >> $GITHUB_ENV
+            echo "BOX64_COMPILER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+            echo "IS_TERMUX=0" >> $GITHUB_ENV
+          fi
+          echo BOX64_BUILD_TYPE=Release >> $GITHUB_ENV
+          echo BOX64_HAVE_TRACE=0 >> $GITHUB_ENV
+          echo BOX64_STATICBUILD=0 >> $GITHUB_ENV
+          echo BOX64_BOX32=0 >> $GITHUB_ENV
 
-      # 3. Build do Box64 para Windroid
-      - name: Build box64 for Windroid
+      - name: "Display Build info"
+        run: |
+          echo "CMake Platform Macro: ${{ env.BOX64_PLATFORM_MARCRO }}"
+          echo "CMake C Compiler: ${{ env.BOX64_COMPILER }}"
+          echo "Build type: ${{ env.BOX64_BUILD_TYPE }}"
+          echo "Trace Enabled: ${{ env.BOX64_HAVE_TRACE }}"
+          echo "StaticBuild Enabled: ${{ env.BOX64_STATICBUILD }}"
+          echo "Box32 Enabled: ${{ env.BOX64_BOX32 }}"
+
+      - name: "Build Box64"
+        run: |
+          mkdir build
+          cd build
+          cmake .. -DCMAKE_C_COMPILER=${{ env.BOX64_COMPILER }}\
+                   -DTERMUX=${{ env.IS_TERMUX }}\
+                   ${{ env.BOX64_PLATFORM_MARCRO }}\
+                   -DCMAKE_BUILD_TYPE=${{ env.BOX64_BUILD_TYPE }}\
+                   -DHAVE_TRACE=${{ env.BOX64_HAVE_TRACE }}\
+                   -DSTATICBUILD=${{ env.BOX64_STATICBUILD }}\
+                   -DBOX32=${{ env.BOX64_BOX32 }}\
+                   -DCMAKE_VERBOSE_MAKEFILE:BOOL=ON\
+                   -DCI=${{ matrix.platform != 'ANDROID' }}
+          make -j$(nproc) VERBOSE=1
+
+      - name: "Test Box64"
+        run: |
+          mkdir qemu9
+          wget -O- -q https://archive.archlinux.org/packages/q/qemu-user-static/qemu-user-static-9.0.2-1-x86_64.pkg.tar.zst | tar -I zstd -C qemu9 -xf -
+          sudo cp qemu9/usr/bin/* /usr/bin/
+
+          cd build
+          export CTEST_OPTIONS="-j$(nproc) --timeout 120 --output-on-failure --repeat until-pass:20"
+          if [[ ${{ matrix.platform }} == 'ANDROID' ]]; then
+            export INTERPRETER=qemu-aarch64-static
+            export QEMU_LD_PREFIX=/system/lib64
+            
+            BOX64_DYNAREC=0 ctest $CTEST_OPTIONS
+            ctest $CTEST_OPTIONS
+          else
+            ctest -j$(nproc)
+          fi
+
+      - name: "Get short Git commit"
+        id: git-info
+        run: echo "SHORT_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
+      - name: "Get Box64 Version"
+        run: echo "BOX64_VERSION=$(cat src/box64version.h | grep BOX64_MAJOR | cut -d " " -f 3).$(cat src/box64version.h | grep BOX64_MINOR | cut -d " " -f 3).$(cat src/box64version.h | grep BOX64_REVISION | cut -d " " -f 3)" >> $GITHUB_ENV
+
+      - name: "Package Rat File for Windroid"
         if: matrix.platform == 'ANDROID'
         run: |
-          echo "Gerando build para Android..."
-          mkdir -p build
-          # Aqui devem vir seus comandos de compilação: configure, make, etc.
-          # Exemplo fictício:
-          cd src
-          ./configure --host=aarch64-linux-android --prefix="$GITHUB_WORKSPACE/build"
-          make -j$(nproc)
-          make install
-          cd "$GITHUB_WORKSPACE/build"
-          # Compacta tudo em formato ZIP, mas já com extensão .rat
-          7z -tzip -mx=5 a box64-latest.rat *
+          cd build
 
-      # 4. Cria o Release no GitHub
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        with:
-          tag_name: ${{ github.ref_name }}       # ex.: v1.2.3
-          release_name: Windroid-box64
-          draft: false
-          prerelease: false
+          mkdir -p files/usr/bin
 
-      # 5. Faz upload do .rat como asset do Release
-      - name: Upload Windroid-box64.rat to Release
-        uses: actions/upload-release-asset@v1
+          cp box64 files/usr/bin
+
+          echo "name=Box64 (CI Build)" > pkg-header
+          echo "category=Box64" >> pkg-header
+          echo "version=${BOX64_VERSION}-${SHORT_COMMIT}" >> pkg-header
+          echo "architecture=aarch64" >> pkg-header
+          echo "vkDriverLib=" >> pkg-header
+
+          7z -tzip -mx=5 a box64-latest.rat files pkg-header
+
+      - name: "Upload Artifact"
+        uses: actions/upload-artifact@v4
         with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: build/box64-latest.rat
-          asset_name: Windroid-box64.rat
-          asset_content_type: application/octet-stream
+          name: box64-${{ matrix.platform }}-${{ matrix.type }}
+          path: build/box64
+
+      - name: "Upload Rat File"
+        if: matrix.platform == 'ANDROID'
+        uses: actions/upload-artifact@v4
+        with:
+          name: box64-Windroid-release
+          path: build/box64-latest.rat
