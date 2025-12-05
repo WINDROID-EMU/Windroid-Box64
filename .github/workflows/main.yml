@@ -3,6 +3,8 @@ name: Build Box64 for Android (MiceWine)
 on:
   workflow_dispatch:
   push:
+    tags:
+      - "v*"
     branches:
       - main
       - master
@@ -11,11 +13,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      NDK_VERSION: r26b
+      NDK_ZIP: android-ndk-r26b-linux.zip
+      NDK_DIR: android-ndk-r26b
+
     steps:
     # -------------------------
-    # 1. Checkout
+    # 1. Checkout do repositório
     # -------------------------
-    - name: Checkout Code
+    - name: Checkout repository
       uses: actions/checkout@v4
 
     # -------------------------
@@ -25,51 +32,61 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y \
-          git cmake ninja-build python3 \
-          p7zip-full unzip wget
+          git cmake ninja-build p7zip-full unzip wget python3 \
+          qemu-user-static proot
 
-    # -------------------------
-    # 3. Clonar Box64
-    # -------------------------
-    - name: Clone Box64 repository
+    # ===========================================================
+    # ETAPA 1: PREPARAR AMBIENTE "DOKED" (TERMUX-DOCKER) PRIMEIRO
+    # ===========================================================
+    - name: Download and prepare DO KED (Termux Docker environment)
       run: |
-        if [ ! -d box64 ]; then
-          git clone https://github.com/ptitSeb/box64.git
+        echo "=== CLONANDO AMBIENTE DOKED (TERMUX-DOCKER) ==="
+
+        if [ ! -d termux-docker ]; then
+          git clone https://github.com/termux/termux-docker.git
         fi
 
-    # -------------------------
-    # 4. Baixar Android NDK
-    # -------------------------
-    - name: Download Android NDK
-      run: |
-        NDK_VERSION=r26b
-        NDK_ZIP=android-ndk-${NDK_VERSION}-linux.zip
-        wget https://dl.google.com/android/repository/$NDK_ZIP
-        unzip -q $NDK_ZIP
-        rm $NDK_ZIP
-        echo "NDK_DIR=android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
-
-    # -------------------------
-    # 5. Preparar Termux Docker (opcional)
-    # -------------------------
-    - name: Clone termux-docker (optional)
-      run: |
-        git clone https://github.com/termux/termux-docker.git || true
         mkdir -p box64/local_system/arm
-        if [ -d "termux-docker/system/arm" ]; then
+
+        if [ -d termux-docker/system/arm ]; then
           cp -r termux-docker/system/arm/* box64/local_system/arm/
+        else
+          echo "AVISO: termux-docker/system/arm nao encontrado!"
         fi
 
-    # -------------------------
-    # 6. Compilar Box64
-    # -------------------------
+    # ===========================================================
+    # ETAPA 2: CACHE + DOWNLOAD DO ANDROID NDK
+    # ===========================================================
+    - name: Cache Android NDK
+      id: cache-ndk
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.workspace }}/ndk
+        key: ndk-${{ env.NDK_VERSION }}
+
+    - name: Download Android NDK
+      if: steps.cache-ndk.outputs.cache-hit != 'true'
+      run: |
+        mkdir -p ${{ runner.workspace }}/ndk
+        cd ${{ runner.workspace }}/ndk
+        wget https://dl.google.com/android/repository/${NDK_ZIP}
+        unzip -q ${NDK_ZIP}
+        rm ${NDK_ZIP}
+
+    - name: Set NDK path
+      run: |
+        echo "NDK_PATH=${{ runner.workspace }}/ndk/${NDK_DIR}" >> $GITHUB_ENV
+
+    # ===========================================================
+    # ETAPA 3: COMPILAR BOX64
+    # ===========================================================
     - name: Build Box64
       run: |
         cd box64
         rm -rf build
         mkdir build && cd build
 
-        TOOLCHAIN="$GITHUB_WORKSPACE/${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+        TOOLCHAIN="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
         cmake .. -G Ninja \
           -DCMAKE_C_COMPILER="${TOOLCHAIN}/aarch64-linux-android31-clang" \
@@ -82,10 +99,10 @@ jobs:
 
         ninja
 
-    # -------------------------
-    # 7. Empacotar .rat
-    # -------------------------
-    - name: Package .rat file
+    # ===========================================================
+    # ETAPA 4: EMPACOTAR O .RAT
+    # ===========================================================
+    - name: Package .rat
       run: |
         cd box64
 
@@ -95,18 +112,17 @@ jobs:
         VER="${MAJ}.${MIN}.${REV}"
 
         COMMIT=$(git rev-parse --short HEAD)
-
         ARTIFACT="box64-MiceWine-Release.rat"
 
         mkdir -p build/files/usr/bin
 
         if [ -f build/box64 ]; then
-            cp build/box64 build/files/usr/bin/
+          cp build/box64 build/files/usr/bin/
         elif [ -f build/box64.exe ]; then
-            cp build/box64.exe build/files/usr/bin/
+          cp build/box64.exe build/files/usr/bin/
         else
-            echo "ERRO: Binário box64 não encontrado!"
-            exit 1
+          echo "ERRO: binario box64 nao encontrado!"
+          exit 1
         fi
 
         cat <<EOF > build/pkg-header
@@ -120,11 +136,24 @@ EOF
         cd build
         7z a -tzip -mx=5 "../${ARTIFACT}" files pkg-header
 
-    # -------------------------
-    # 8. Upload do artefato
-    # -------------------------
-    - name: Upload Artifact
+        echo "ARTIFACT_PATH=box64/${ARTIFACT}" >> $GITHUB_ENV
+
+    # ===========================================================
+    # ETAPA 5: UPLOAD COMO ARTEFATO
+    # ===========================================================
+    - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: box64-MiceWine
-        path: box64/*.rat
+        path: ${{ env.ARTIFACT_PATH }}
+
+    # ===========================================================
+    # ETAPA 6: UPLOAD AUTOMÁTICO PARA RELEASE
+    # ===========================================================
+    - name: Upload to Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ${{ env.ARTIFACT_PATH }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
