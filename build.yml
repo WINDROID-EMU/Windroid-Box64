@@ -1,0 +1,130 @@
+name: Build Box64 for Android (MiceWine)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    # -------------------------
+    # 1. Checkout
+    # -------------------------
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    # -------------------------
+    # 2. Instalar dependências
+    # -------------------------
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          git cmake ninja-build python3 \
+          p7zip-full unzip wget
+
+    # -------------------------
+    # 3. Clonar Box64
+    # -------------------------
+    - name: Clone Box64 repository
+      run: |
+        if [ ! -d box64 ]; then
+          git clone https://github.com/ptitSeb/box64.git
+        fi
+
+    # -------------------------
+    # 4. Baixar Android NDK
+    # -------------------------
+    - name: Download Android NDK
+      run: |
+        NDK_VERSION=r26b
+        NDK_ZIP=android-ndk-${NDK_VERSION}-linux.zip
+        wget https://dl.google.com/android/repository/$NDK_ZIP
+        unzip -q $NDK_ZIP
+        rm $NDK_ZIP
+        echo "NDK_DIR=android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
+
+    # -------------------------
+    # 5. Preparar Termux Docker (opcional)
+    # -------------------------
+    - name: Clone termux-docker (optional)
+      run: |
+        git clone https://github.com/termux/termux-docker.git || true
+        mkdir -p box64/local_system/arm
+        if [ -d "termux-docker/system/arm" ]; then
+          cp -r termux-docker/system/arm/* box64/local_system/arm/
+        fi
+
+    # -------------------------
+    # 6. Compilar Box64
+    # -------------------------
+    - name: Build Box64
+      run: |
+        cd box64
+        rm -rf build
+        mkdir build && cd build
+
+        TOOLCHAIN="$GITHUB_WORKSPACE/${NDK_DIR}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+        cmake .. -G Ninja \
+          -DCMAKE_C_COMPILER="${TOOLCHAIN}/aarch64-linux-android31-clang" \
+          -DANDROID=1 \
+          -DARM_DYNAREC=1 \
+          -DBAD_SIGNAL=1 \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DHAVE_BACKTRACE:BOOL=OFF \
+          -DCI=OFF
+
+        ninja
+
+    # -------------------------
+    # 7. Empacotar .rat
+    # -------------------------
+    - name: Package .rat file
+      run: |
+        cd box64
+
+        MAJ=$(grep BOX64_MAJOR src/box64version.h | awk '{print $3}')
+        MIN=$(grep BOX64_MINOR src/box64version.h | awk '{print $3}')
+        REV=$(grep BOX64_REVISION src/box64version.h | awk '{print $3}')
+        VER="${MAJ}.${MIN}.${REV}"
+
+        COMMIT=$(git rev-parse --short HEAD)
+
+        ARTIFACT="box64-MiceWine-Release.rat"
+
+        mkdir -p build/files/usr/bin
+
+        if [ -f build/box64 ]; then
+            cp build/box64 build/files/usr/bin/
+        elif [ -f build/box64.exe ]; then
+            cp build/box64.exe build/files/usr/bin/
+        else
+            echo "ERRO: Binário box64 não encontrado!"
+            exit 1
+        fi
+
+        cat <<EOF > build/pkg-header
+name=Box64 (CI Build)
+category=Box64
+version=${VER}-${COMMIT}
+architecture=aarch64
+vkDriverLib=
+EOF
+
+        cd build
+        7z a -tzip -mx=5 "../${ARTIFACT}" files pkg-header
+
+    # -------------------------
+    # 8. Upload do artefato
+    # -------------------------
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: box64-MiceWine
+        path: box64/*.rat
